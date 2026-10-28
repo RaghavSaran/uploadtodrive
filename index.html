@@ -1,0 +1,934 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1115">
+<meta name="referrer" content="no-referrer">
+<title>Live Recorder → Google Drive</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0f1115; --panel: #181b22; --line: #2a2f3a; --text: #e8eaf0; --muted: #9aa3b2;
+    --accent: #3b82f6; --red: #ef4444; --green: #22c55e; --amber: #f59e0b;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  body { padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+  main { max-width: 760px; margin: 0 auto; padding: 12px; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+  h1 { font-size: 17px; margin: 0; font-weight: 600; }
+  h2 { font-size: 15px; margin: 0; }
+  .muted { color: var(--muted); }
+  .small-text { font-size: 13px; margin: 8px 0 0; }
+  .pill { font-size: 12px; padding: 3px 10px; border-radius: 999px; background: var(--panel);
+    border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+  .pill.rec { color: #fff; background: var(--red); border-color: var(--red); }
+  .pill.up { color: #bcd3f7; border-color: #23395e; }
+  .pill.ok { color: var(--green); border-color: #1f5135; }
+
+  .stage { position: relative; background: #000; border-radius: 12px; overflow: hidden; width: 100%;
+    aspect-ratio: 3 / 4; max-height: 62vh; display: flex; align-items: center; justify-content: center; }
+  @media (orientation: landscape) { .stage { aspect-ratio: 16 / 9; } }
+  video { width: 100%; height: 100%; object-fit: contain; background: #000; }
+  video.mirror { transform: scaleX(-1); }
+  .placeholder { position: absolute; color: var(--muted); text-align: center; padding: 20px; }
+  .ov { position: absolute; font: 600 13px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    background: rgba(0,0,0,.6); padding: 6px 9px; border-radius: 8px; }
+  .ov.tl { top: 10px; left: 10px; }
+  .ov.tr { top: 10px; right: 10px; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--red);
+    margin-right: 6px; animation: blink 1s infinite; }
+  @keyframes blink { 50% { opacity: .25; } }
+  .hidden { display: none !important; }
+
+  .controls { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; margin: 10px 0 4px; }
+  button { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--line);
+    padding: 12px 14px; border-radius: 10px; cursor: pointer; touch-action: manipulation; }
+  button:disabled { opacity: .45; cursor: default; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button.stop { background: var(--red); border-color: var(--red); color: #fff; font-weight: 600; }
+  button.small { padding: 7px 10px; font-size: 13px; }
+  .hint { font-size: 12.5px; color: var(--muted); margin: 4px 2px 8px; }
+
+  .banner { margin: 8px 0; padding: 10px 12px; border-radius: 10px; font-size: 14px; border: 1px solid; }
+  .banner.warn { background: #2a2110; border-color: #5c4513; color: #fcd38d; }
+  .banner.err { background: #2a1414; border-color: #6b2121; color: #fca5a5; }
+
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 10px 0; }
+  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 8px 4px; text-align: center; min-width: 0; }
+  .stat b { display: block; font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .stat span { font-size: 11px; color: var(--muted); }
+
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; margin: 10px 0; }
+  summary { cursor: pointer; font-weight: 600; }
+  .row-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .row-head > div { display: flex; gap: 6px; }
+  .list { list-style: none; margin: 8px 0 0; padding: 0; max-height: 280px; overflow: auto; }
+  .list li { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; padding: 7px 2px;
+    border-top: 1px solid var(--line); font-size: 13.5px; align-items: center; }
+  .list li:first-child { border-top: 0; }
+  .list .mt { color: var(--muted); }
+  .st.queued { color: var(--muted); }
+  .st.uploading { color: #93c5fd; }
+  .st.retry { color: var(--amber); }
+  .st.done a { color: var(--green); text-decoration: none; }
+
+  label { display: block; font-size: 13px; color: var(--muted); margin-top: 10px; }
+  input, select { display: block; width: 100%; margin-top: 4px; font: inherit; font-size: 16px; color: var(--text);
+    background: #0f1218; border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px; }
+  label.check { display: flex; align-items: center; gap: 8px; color: var(--text); font-size: 15px; }
+  label.check input { width: auto; margin: 0; }
+  .inline { display: flex; gap: 6px; align-items: stretch; }
+  .inline input { flex: 1; }
+  .inline button { margin-top: 4px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 10px; align-items: end; }
+  .btns { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+  .warn-text { color: var(--amber); }
+  pre { white-space: pre-wrap; word-break: break-word; font-size: 12px; max-height: 260px; overflow: auto; margin: 8px 0 0; color: #c9d1dc; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Live Recorder <span class="muted">→ Drive</span></h1>
+    <span id="pill" class="pill">Idle</span>
+  </header>
+
+  <div class="stage">
+    <video id="preview" playsinline muted autoplay></video>
+    <div id="placeholder" class="placeholder">Camera is off</div>
+    <div id="ovRec" class="ov tl hidden"><span class="dot"></span>REC <span id="recTime">0:00</span></div>
+    <div id="ovSeg" class="ov tr hidden"></div>
+  </div>
+
+  <div id="banners"></div>
+
+  <div class="controls">
+    <button id="btnMain" class="primary" type="button">Start camera</button>
+    <button id="btnFlip" type="button" title="Switch between front and back camera">Flip</button>
+    <button id="btnClose" type="button" title="Turn the camera off">Close</button>
+  </div>
+  <p class="hint">Keep the screen on and this page in front while recording. Locking the phone or switching apps
+    pauses the camera; recording continues as a new part when you come back.</p>
+
+  <div class="stats">
+    <div class="stat"><b id="stDone">0</b><span>in Drive</span></div>
+    <div class="stat"><b id="stPending">0</b><span>pending</span></div>
+    <div class="stat"><b id="stMem">0 MB</b><span>in memory</span></div>
+    <div class="stat"><b id="stFormat">–</b><span>format</span></div>
+  </div>
+
+  <section class="card">
+    <div class="row-head">
+      <h2>Segments</h2>
+      <div>
+        <button id="btnRetry" class="small" type="button" title="Retry pending uploads now">Retry now</button>
+        <button id="btnDownload" class="small" type="button" title="Download parts that are not in Drive yet">Save pending</button>
+      </div>
+    </div>
+    <ul id="list" class="list"></ul>
+    <p id="listEmpty" class="muted small-text">Finished parts appear here. A part is dropped from memory only after
+      Drive confirms it with the exact byte size.</p>
+  </section>
+
+  <details id="settings" class="card">
+    <summary>Settings</summary>
+    <label>Apps Script web app URL
+      <input id="sUrl" type="url" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false"
+             placeholder="https://script.google.com/macros/s/…/exec">
+    </label>
+    <label>Secret key
+      <span class="inline">
+        <input id="sKey" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="printed by setup()">
+        <button id="btnShowKey" class="small" type="button">Show</button>
+      </span>
+    </label>
+    <div class="grid2">
+      <label>Quality <select id="sQuality"></select></label>
+      <label>Part length (seconds) <input id="sSeg" type="number" min="5" max="600" step="1" inputmode="numeric"></label>
+      <label>Format
+        <select id="sFormat">
+          <option value="auto">Auto (recommended)</option>
+          <option value="mp4">MP4 (H.264 / AAC)</option>
+          <option value="webm">WebM (VP8 / Opus)</option>
+        </select>
+      </label>
+      <label class="check"><input id="sAudio" type="checkbox"> Record audio</label>
+    </div>
+    <p id="sHint" class="muted small-text"></p>
+    <div class="btns">
+      <button id="btnSaveSettings" class="primary small" type="button">Save</button>
+      <button id="btnTest" class="small" type="button">Test connection</button>
+      <button id="btnLink" class="small" type="button">Copy setup link</button>
+    </div>
+    <p class="muted small-text">Settings are stored only in this browser. The setup link contains your secret key,
+      so send it only to your own devices.</p>
+  </details>
+
+  <details class="card">
+    <summary>Log</summary>
+    <pre id="log"></pre>
+  </details>
+</main>
+
+<script>
+(() => {
+  'use strict';
+
+  /* Optional defaults. Safe to commit: put the web app URL here if you like, never the secret key. */
+  const CONFIG = {
+    scriptUrl: 'https://script.google.com/macros/s/AKfycbyj1YYZatZMXQMnS3rxR_OGWuOo3_J2rwLj_7mXAbVMQCUQQZApl7NIzhEKVjff6UG6IQ/exec',
+    segmentSeconds: 60,
+  };
+
+  const QUALITY = {
+    low:      { label: 'Low · 480p · ~8 MB/min',       w: 854,  h: 480,  fps: 30, vbps: 1_000_000 },
+    standard: { label: 'Standard · 720p · ~16 MB/min', w: 1280, h: 720,  fps: 30, vbps: 2_000_000 },
+    high:     { label: 'High · 1080p · ~27 MB/min',    w: 1920, h: 1080, fps: 30, vbps: 3_500_000 },
+  };
+  const AUDIO_BPS = 128_000;
+  // Apps Script accepts roughly 50 MB per request and base64 adds 33 %, so stay well below.
+  const SAFE_PART_BYTES = 35 * 1024 * 1024;
+  const UPLOAD_TIMEOUT_MS = 5 * 60 * 1000;
+  const MEMORY_WARN_BYTES = 300 * 1024 * 1024;
+  const SETTINGS_KEY = 'liveRecorder.settings.v1';
+
+  const $ = (id) => document.getElementById(id);
+  const el = {
+    pill: $('pill'), video: $('preview'), placeholder: $('placeholder'), ovRec: $('ovRec'), recTime: $('recTime'),
+    ovSeg: $('ovSeg'), banners: $('banners'), btnMain: $('btnMain'), btnFlip: $('btnFlip'), btnClose: $('btnClose'),
+    stDone: $('stDone'), stPending: $('stPending'), stMem: $('stMem'), stFormat: $('stFormat'),
+    btnRetry: $('btnRetry'), btnDownload: $('btnDownload'), list: $('list'), listEmpty: $('listEmpty'),
+    settings: $('settings'), sUrl: $('sUrl'), sKey: $('sKey'), btnShowKey: $('btnShowKey'), sQuality: $('sQuality'),
+    sSeg: $('sSeg'), sFormat: $('sFormat'), sAudio: $('sAudio'), sHint: $('sHint'),
+    btnSaveSettings: $('btnSaveSettings'), btnTest: $('btnTest'), btnLink: $('btnLink'), log: $('log'),
+  };
+
+  /* ---------- helpers ---------- */
+  const pad = (n, w = 2) => String(n).padStart(w, '0');
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  function fmtDur(ms) {
+    const s = Math.max(0, Math.round(ms / 1000));
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    return h ? `${h}:${pad(m)}:${pad(sec)}` : `${m}:${pad(sec)}`;
+  }
+  function fmtBytes(n) {
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+    return `${(n / 1048576).toFixed(1)} MB`;
+  }
+  function stamp(d = new Date()) {
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}-${pad(d.getMinutes())}-${pad(d.getSeconds())}`;
+  }
+  function extFor(type) {
+    const t = (type || '').toLowerCase();
+    if (t.includes('mp4')) return 'mp4';
+    if (t.includes('webm')) return 'webm';
+    if (t.includes('matroska')) return 'mkv';
+    if (t.includes('quicktime')) return 'mov';
+    return 'bin';
+  }
+  function shortFormat(type) {
+    const t = (type || '').toLowerCase();
+    if (!t) return '–';
+    return t.includes('mp4') ? 'MP4' : t.includes('webm') ? 'WebM' : t.split(';')[0]; // full type is in the tooltip
+  }
+
+  const logLines = [];
+  function log(msg, level = 'info') {
+    const line = `[${new Date().toLocaleTimeString()}] ${msg}`;
+    (level === 'error' ? console.error : level === 'warn' ? console.warn : console.log)(line);
+    logLines.push(line);
+    if (logLines.length > 300) logLines.shift();
+    el.log.textContent = logLines.join('\n');
+  }
+
+  /* ---------- settings ---------- */
+  const DEFAULTS = { url: CONFIG.scriptUrl, key: '', quality: 'standard', segSec: CONFIG.segmentSeconds,
+                     format: 'auto', audio: true, facing: 'environment' };
+  let settings = (() => {
+    let saved = {};
+    try { saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}') || {}; } catch { /* ignore */ }
+    const s = { ...DEFAULTS, ...saved };
+    if (!s.url) s.url = CONFIG.scriptUrl;
+    return s;
+  })();
+  function persist() {
+    try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch { /* private mode */ }
+  }
+  function importFromHash() {
+    if (location.hash.length < 2) return;
+    const p = new URLSearchParams(location.hash.slice(1));
+    let changed = false;
+    if (p.get('url')) { settings.url = p.get('url').trim(); changed = true; }
+    if (p.get('key')) { settings.key = p.get('key').trim(); changed = true; }
+    if (changed) {
+      persist();
+      history.replaceState(null, '', location.pathname + location.search); // keep the key out of the address bar
+      log('Settings imported from setup link.');
+    }
+  }
+
+  /* ---------- platform / format ---------- */
+  const UA = navigator.userAgent;
+  const IS_IOS = /iPad|iPhone|iPod/.test(UA) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const IS_SAFARI = /Safari\//.test(UA) && !/Chrome\/|Chromium\/|Edg\/|OPR\/|Android/.test(UA);
+  // Apple devices encode H.264 in hardware; Chrome on Android is most reliable with WebM.
+  const PREFER_MP4 = IS_IOS || IS_SAFARI;
+
+  function candidateTypes(s) {
+    const a = s.audio;
+    const mp4 = a ? ['video/mp4;codecs=avc1.42E01E,mp4a.40.2', 'video/mp4;codecs=avc1,mp4a.40.2', 'video/mp4']
+                  : ['video/mp4;codecs=avc1.42E01E', 'video/mp4;codecs=avc1', 'video/mp4'];
+    const webm = a ? ['video/webm;codecs=vp8,opus', 'video/webm;codecs=vp9,opus', 'video/webm']
+                   : ['video/webm;codecs=vp8', 'video/webm;codecs=vp9', 'video/webm'];
+    const fmt = s.format === 'auto' ? (PREFER_MP4 ? 'mp4' : 'webm') : s.format;
+    return fmt === 'mp4' ? mp4.concat(webm) : webm.concat(mp4);
+  }
+  function pickMime(s = settings) {
+    if (!window.MediaRecorder || typeof MediaRecorder.isTypeSupported !== 'function') return '';
+    return candidateTypes(s).find((t) => { try { return MediaRecorder.isTypeSupported(t); } catch { return false; } }) || '';
+  }
+  function supportError() {
+    if (!window.isSecureContext) return 'This page must be opened over HTTPS (GitHub Pages is fine).';
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return 'This browser cannot access the camera.';
+    if (!window.MediaRecorder) return 'This browser cannot record video (no MediaRecorder). On iPhone, update to iOS 14.5 or later.';
+    return '';
+  }
+  const SUPPORT_ERROR = supportError();
+
+  /* ---------- camera ---------- */
+  let stream = null;
+  let busy = false;
+
+  function streamIsLive() {
+    return !!stream && stream.getTracks().length > 0 && stream.getTracks().every((t) => t.readyState === 'live');
+  }
+  function currentFacing() {
+    const s = stream && stream.getVideoTracks()[0] && stream.getVideoTracks()[0].getSettings
+      ? stream.getVideoTracks()[0].getSettings() : {};
+    return s.facingMode || settings.facing;
+  }
+  function stopStream() {
+    if (!stream) return;
+    stream.getTracks().forEach((t) => { try { t.stop(); } catch { /* ignore */ } });
+    stream = null;
+    el.video.srcObject = null;
+  }
+  async function openCamera() {
+    stopStream(); // phones cannot open two cameras at once
+    const q = QUALITY[settings.quality] || QUALITY.standard;
+    const audio = settings.audio ? { echoCancellation: true, noiseSuppression: true, autoGainControl: true } : false;
+    let s;
+    try {
+      s = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: settings.facing }, width: { ideal: q.w }, height: { ideal: q.h },
+                 frameRate: { ideal: q.fps, max: 30 } },
+        audio,
+      });
+    } catch (err) {
+      if (err.name !== 'OverconstrainedError') throw err;
+      s = await navigator.mediaDevices.getUserMedia({ video: { facingMode: settings.facing }, audio: !!settings.audio });
+    }
+    stream = s;
+    s.getTracks().forEach((t) => {
+      t.addEventListener('ended', () => onTrackEnded(s, t));
+      t.addEventListener('mute', () => log(`${t.kind} paused by the system.`, 'warn'));
+      t.addEventListener('unmute', () => log(`${t.kind} resumed.`));
+    });
+    el.video.muted = true;
+    el.video.srcObject = s;
+    el.video.classList.toggle('mirror', currentFacing() === 'user');
+    try { await el.video.play(); } catch { /* preview only */ }
+    const vs = s.getVideoTracks()[0] ? s.getVideoTracks()[0].getSettings() : {};
+    log(`Camera on: ${vs.width || '?'}×${vs.height || '?'} @ ${Math.round(vs.frameRate || 0) || '?'} fps, ` +
+        `${currentFacing()} camera, ${s.getAudioTracks().length ? 'with' : 'no'} audio.`);
+    renderAll();
+  }
+  function onTrackEnded(s, track) {
+    if (s !== stream) return; // an old stream we already replaced
+    log(`The ${track.kind} track was stopped by the system.`, 'warn');
+    if (rec.active && rec.current) stopSegment(rec.current); // finalize; ensureRecording() reopens the camera
+    renderAll();
+  }
+  function cameraErrorText(err) {
+    switch (err && err.name) {
+      case 'NotAllowedError': return 'Camera or microphone permission was denied. Allow it in the browser settings and reload.';
+      case 'NotFoundError': return 'No camera or microphone was found.';
+      case 'NotReadableError': return 'The camera is busy in another app. Close that app and try again.';
+      case 'SecurityError': return 'Camera access is blocked on this page (HTTPS is required).';
+      default: return (err && err.message) || String(err);
+    }
+  }
+
+  /* ---------- recorder: one independently playable file per part ---------- */
+  const rec = {
+    active: false, session: '', sessionStart: 0, part: 0, current: null, timer: null, mime: '',
+    overlap: true, lastRotateAt: 0, restarting: false, retryCount: 0, pausedReason: '',
+  };
+
+  function recorderOptions() {
+    const q = QUALITY[settings.quality] || QUALITY.standard;
+    const o = { videoBitsPerSecond: q.vbps };
+    if (settings.audio) o.audioBitsPerSecond = AUDIO_BPS;
+    if (rec.mime) o.mimeType = rec.mime;
+    return o;
+  }
+
+  function startSegment() {
+    const r = new MediaRecorder(stream, recorderOptions());
+    const vs = stream.getVideoTracks()[0] ? stream.getVideoTracks()[0].getSettings() : {};
+    const seg = { r, part: 0, chunks: [], startedAt: 0, endedAt: 0, done: false, session: rec.session,
+                  width: vs.width, height: vs.height, facing: currentFacing(), onDone: null };
+    r.ondataavailable = (e) => { if (e.data && e.data.size) seg.chunks.push(e.data); };
+    r.onerror = (e) => onRecorderError(seg, e);
+    r.onstop = () => finalizeSegment(seg);
+    r.start(); // throws if the browser refuses
+    seg.part = ++rec.part;
+    seg.startedAt = Date.now();
+    rec.current = seg;
+    clearTimeout(rec.timer);
+    rec.timer = setTimeout(() => { if (rec.current === seg) rotate(); }, Math.max(5, settings.segSec) * 1000);
+    return seg;
+  }
+
+  function stopSegment(seg) {
+    if (!seg) return;
+    if (!seg.endedAt) seg.endedAt = Date.now();
+    if (seg.r.state !== 'inactive') {
+      try { seg.r.stop(); } catch (err) { log(`Could not stop part ${seg.part}: ${err.message}`, 'error'); finalizeSegment(seg); }
+    }
+  }
+
+  // Start the next recorder before stopping the current one (same JS task), so no frames fall between parts.
+  function rotate() {
+    const old = rec.current;
+    if (!rec.active || !old) return;
+    rec.lastRotateAt = Date.now();
+    if (rec.overlap && streamIsLive()) {
+      try { startSegment(); } catch (err) {
+        rec.overlap = false;
+        log(`Overlapping recorders not supported here (${err.name}); switching to back-to-back mode.`, 'warn');
+      }
+    }
+    // If the new part did not start, finalizeSegment(old) sees old === rec.current and starts the next one.
+    stopSegment(old);
+  }
+
+  function onRecorderError(seg, e) {
+    const err = (e && e.error) || e || {};
+    log(`Recorder error in part ${seg.part}: ${err.name || ''} ${err.message || ''}`.trim(), 'error');
+    if (rec.overlap && Date.now() - rec.lastRotateAt < 3000) {
+      rec.overlap = false;
+      log('Disabling overlapping recorders on this device.', 'warn');
+    }
+    if (seg.r.state !== 'inactive') { try { seg.r.stop(); } catch { /* ignore */ } }
+    setTimeout(() => finalizeSegment(seg), 3000); // in case 'stop' never fires
+  }
+
+  function finalizeSegment(seg) {
+    if (seg.done) return;
+    seg.done = true;
+    if (!seg.endedAt) seg.endedAt = Date.now();
+    const type = seg.r.mimeType || rec.mime || 'video/webm';
+    const blob = new Blob(seg.chunks, { type });
+    seg.chunks = [];
+    if (blob.size > 0) enqueueUpload(makeItem(seg, blob));
+    else log(`Part ${seg.part} produced no data and was skipped.`, 'warn');
+    if (seg.onDone) seg.onDone();
+    if (rec.current === seg) {          // stopped unexpectedly (error, camera lost) or back-to-back mode
+      rec.current = null;
+      if (rec.active) ensureRecording();
+    }
+    renderAll();
+  }
+
+  async function ensureRecording() {
+    if (!rec.active || rec.current || rec.restarting) return;
+    rec.restarting = true;
+    try {
+      if (!streamIsLive()) {
+        if (document.visibilityState !== 'visible') {
+          rec.pausedReason = 'The camera was interrupted. Come back to this page to continue recording.';
+          log('Waiting for the page to be visible before restarting the camera.', 'warn');
+          return;
+        }
+        log('Restarting the camera…');
+        await openCamera();
+      }
+      if (!rec.active || rec.current) return;
+      startSegment();
+      rec.pausedReason = '';
+      rec.retryCount = 0;
+    } catch (err) {
+      rec.retryCount++;
+      log(`Could not restart recording: ${cameraErrorText(err)} (attempt ${rec.retryCount}/5)`, 'error');
+      if (rec.retryCount >= 5) stopRecording(`Recording stopped: ${cameraErrorText(err)}`);
+      else setTimeout(ensureRecording, 2000);
+    } finally {
+      rec.restarting = false;
+      renderAll();
+    }
+  }
+
+  async function startRecording() {
+    if (!settings.url || !settings.key) {
+      el.settings.open = true;
+      el.settings.scrollIntoView({ behavior: 'smooth' });
+      throw new Error('Enter the Apps Script web app URL and secret key in Settings first.');
+    }
+    if (!streamIsLive()) await openCamera();
+    rec.mime = pickMime();
+    rec.session = stamp();
+    rec.sessionStart = Date.now();
+    rec.part = 0;
+    rec.overlap = true;
+    rec.retryCount = 0;
+    rec.pausedReason = '';
+    rec.active = true;
+    try { startSegment(); } catch (err) { rec.active = false; throw err; }
+    log(`Recording started: session ${rec.session}, ${rec.current.r.mimeType || rec.mime || 'browser default format'}, ` +
+        `${settings.segSec}s parts.`);
+    startTicker();
+    updateWakeLock();
+    renderAll();
+  }
+
+  function stopRecording(reason) {
+    if (!rec.active) return;
+    rec.active = false;
+    clearTimeout(rec.timer);
+    const seg = rec.current;
+    rec.current = null; // so finalizeSegment does not start another part
+    rec.pausedReason = '';
+    if (seg) stopSegment(seg);
+    stopTicker();
+    log(reason || 'Recording stopped.', reason ? 'warn' : 'info');
+    updateWakeLock();
+    renderAll();
+  }
+
+  async function flipCamera() {
+    settings.facing = currentFacing() === 'user' ? 'environment' : 'user';
+    persist();
+    if (rec.active) {
+      // A camera switch always starts a new part: the old recorder cannot continue on a new stream.
+      clearTimeout(rec.timer);
+      rec.restarting = true; // keep ensureRecording() out while the stream is swapped
+      try {
+        const old = rec.current;
+        rec.current = null;
+        if (old) {
+          const stopped = old.done ? Promise.resolve() : new Promise((res) => { old.onDone = res; });
+          stopSegment(old);
+          await Promise.race([stopped, sleep(3000)]);
+        }
+        await openCamera();
+        if (rec.active && !rec.current) startSegment();
+      } catch (err) {
+        log(`Camera switch failed: ${cameraErrorText(err)}`, 'error');
+      } finally {
+        rec.restarting = false;
+      }
+      if (rec.active && !rec.current) ensureRecording();
+    } else {
+      await openCamera();
+    }
+  }
+
+  /* ---------- upload queue: verify, then drop from memory ---------- */
+  const up = { queue: [], busy: false, current: null, doneCount: 0, doneBytes: 0, lastError: '', wake: null };
+
+  function makeItem(seg, blob) {
+    const durationMs = seg.endedAt - seg.startedAt;
+    return {
+      session: seg.session, part: seg.part,
+      name: `${seg.session}_part${pad(seg.part, 4)}.${extFor(blob.type)}`,
+      blob, size: blob.size, mimeType: blob.type.split(';')[0].trim() || 'application/octet-stream', durationMs,
+      meta: {
+        session: seg.session, part: seg.part, startedAt: new Date(seg.startedAt).toISOString(),
+        endedAt: new Date(seg.endedAt).toISOString(), durationMs, recorderMimeType: blob.type,
+        width: seg.width, height: seg.height, facing: seg.facing, quality: settings.quality, userAgent: UA,
+      },
+      attempts: 0, nextTryAt: 0, status: 'queued', lastError: '', fileId: '', fileUrl: '', row: null,
+    };
+  }
+
+  function enqueueUpload(item) {
+    up.queue.push(item);
+    addRow(item);
+    log(`Part ${item.part} ready: ${fmtDur(item.durationMs)}, ${fmtBytes(item.size)}.`);
+    if (item.size > SAFE_PART_BYTES) {
+      log(`Part ${item.part} is ${fmtBytes(item.size)}; Apps Script may reject uploads this large. Lower the quality or part length.`, 'warn');
+    }
+    wakeUploader(); // the uploader may be sleeping on another part's retry delay
+    pumpUploads();
+    updateWakeLock();
+  }
+
+  function wakeUploader() { const w = up.wake; up.wake = null; if (w) w(); }
+  function napUntil(ms) {
+    return new Promise((res) => {
+      const t = setTimeout(() => { up.wake = null; res(); }, ms);
+      up.wake = () => { clearTimeout(t); res(); };
+    });
+  }
+  function retryAllNow() { up.queue.forEach((i) => { i.nextTryAt = 0; }); wakeUploader(); }
+
+  async function pumpUploads() {
+    if (up.busy) return;
+    up.busy = true;
+    try {
+      while (up.queue.length) {
+        const item = up.queue.reduce((a, b) => (b.nextTryAt < a.nextTryAt ? b : a)); // oldest due first
+        const wait = item.nextTryAt - Date.now();
+        if (wait > 0) { renderAll(); await napUntil(wait); continue; }
+        await uploadItem(item);
+      }
+    } finally {
+      up.busy = false;
+      renderAll();
+      updateWakeLock();
+    }
+  }
+
+  async function uploadItem(item) {
+    item.attempts++;
+    item.status = 'uploading';
+    up.current = item;
+    updateRow(item);
+    renderAll();
+    const t0 = Date.now();
+    try {
+      const res = await postToScript({ action: 'upload', session: item.session, name: item.name,
+                                       mimeType: item.mimeType, size: item.size, meta: item.meta }, item.blob);
+      if (!res.ok) throw new Error(res.error || 'Upload rejected by Apps Script');
+      if (Number(res.size) !== item.size) throw new Error(`size check failed (Drive has ${res.size} B, expected ${item.size} B)`);
+      // Verified: Drive holds a file with exactly these bytes. Release the local copy.
+      item.status = 'done';
+      item.fileId = res.id || '';
+      item.fileUrl = res.url || '';
+      item.blob = null;
+      item.lastError = '';
+      up.queue.splice(up.queue.indexOf(item), 1);
+      up.doneCount++;
+      up.doneBytes += item.size;
+      up.lastError = '';
+      log(`Part ${item.part} verified in Drive (${fmtBytes(item.size)}, ${((Date.now() - t0) / 1000).toFixed(1)} s)` +
+          `${res.duplicate ? ', already existed' : ''}.`);
+    } catch (err) {
+      const msg = err.name === 'AbortError' ? 'upload timed out' : (err.message || String(err));
+      const delay = Math.min(60000, 2000 * 2 ** Math.min(item.attempts - 1, 5));
+      item.status = 'retry';
+      item.lastError = msg;
+      item.nextTryAt = Date.now() + delay;
+      up.lastError = `part ${item.part}: ${msg}`;
+      log(`Upload of part ${item.part} failed (attempt ${item.attempts}): ${msg}. Retrying in ${Math.round(delay / 1000)} s.`, 'error');
+    } finally {
+      up.current = null;
+      updateRow(item);
+      renderAll();
+    }
+  }
+
+  function blobToBase64(blob) {
+    return new Promise((resolve, reject) => {
+      const fr = new FileReader();
+      // The MIME type itself can contain commas ("codecs=vp8,opus"); base64 never does.
+      fr.onload = () => { const s = String(fr.result); resolve(s.slice(s.lastIndexOf(',') + 1)); };
+      fr.onerror = () => reject(fr.error || new Error('Could not read the recorded data'));
+      fr.readAsDataURL(blob);
+    });
+  }
+
+  // Body = one JSON header line, then (for uploads) the base64 file data.
+  // text/plain keeps this a CORS "simple request": Apps Script cannot answer preflight requests.
+  async function postToScript(head, blob) {
+    const url = (settings.url || '').trim();
+    if (!url) throw new Error('Apps Script URL is not set');
+    if (!settings.key) throw new Error('secret key is not set');
+    const headerLine = JSON.stringify({ ...head, key: settings.key });
+    const body = blob ? headerLine + '\n' + await blobToBase64(blob) : headerLine;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), UPLOAD_TIMEOUT_MS);
+    try {
+      let resp;
+      try {
+        resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body,
+                                  redirect: 'follow', cache: 'no-store', credentials: 'omit', signal: ctrl.signal });
+      } catch (err) {
+        if (err.name === 'AbortError') throw err;
+        throw new Error(navigator.onLine === false ? 'device is offline' : `network error (${err.message})`);
+      }
+      const text = await resp.text();
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      try { return JSON.parse(text); } catch {
+        throw new Error(/<html|<!doctype/i.test(text)
+          ? 'got a web page instead of JSON. Check the URL ends in /exec and the deployment access is "Anyone"'
+          : 'unexpected response from Apps Script');
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  function downloadPending() {
+    const items = up.queue.filter((i) => i.blob);
+    if (!items.length) return;
+    items.forEach((it, idx) => setTimeout(() => {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(it.blob);
+      a.download = it.name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+    }, idx * 800));
+    log(`Saving ${items.length} pending part(s) to this device. They stay queued for Drive as well.`);
+  }
+
+  /* ---------- screen wake lock ---------- */
+  let wakeLock = null, wakePending = false, wakeWarned = false;
+  async function updateWakeLock() {
+    const want = rec.active || up.queue.length > 0;
+    if (want && !wakeLock && !wakePending && 'wakeLock' in navigator && document.visibilityState === 'visible') {
+      wakePending = true;
+      try {
+        wakeLock = await navigator.wakeLock.request('screen');
+        wakeLock.addEventListener('release', () => { wakeLock = null; });
+      } catch (err) {
+        if (!wakeWarned) { wakeWarned = true; log(`Screen wake lock unavailable (${err.message}). Keep the screen on manually.`, 'warn'); }
+      } finally { wakePending = false; }
+    } else if (!want && wakeLock) {
+      const w = wakeLock; wakeLock = null;
+      try { await w.release(); } catch { /* ignore */ }
+    }
+  }
+
+  /* ---------- UI ---------- */
+  let ticker = null;
+  function startTicker() { stopTicker(); ticker = setInterval(renderTime, 250); renderTime(); }
+  function stopTicker() { clearInterval(ticker); ticker = null; renderTime(); }
+  function renderTime() {
+    el.ovRec.classList.toggle('hidden', !rec.active);
+    el.ovSeg.classList.toggle('hidden', !rec.active);
+    if (!rec.active) return;
+    el.recTime.textContent = fmtDur(Date.now() - rec.sessionStart);
+    const seg = rec.current;
+    el.ovSeg.textContent = seg
+      ? `Part ${seg.part} · ${fmtDur(Date.now() - seg.startedAt)} / ${fmtDur(settings.segSec * 1000)}`
+      : (rec.pausedReason ? 'Paused' : 'Restarting…');
+  }
+
+  function addRow(item) {
+    const li = document.createElement('li');
+    li.innerHTML = '<span class="nm"></span><span class="mt"></span><span class="st"></span>';
+    item.row = li;
+    el.list.prepend(li);
+    while (el.list.children.length > 200) el.list.lastElementChild.remove();
+    updateRow(item);
+  }
+  function updateRow(item) {
+    const li = item.row;
+    if (!li) return;
+    li.querySelector('.nm').textContent = `Part ${pad(item.part, 4)}`;
+    li.querySelector('.mt').textContent = `${fmtDur(item.durationMs)} · ${fmtBytes(item.size)}`;
+    const st = li.querySelector('.st');
+    st.className = `st ${item.status}`;
+    st.textContent = '';
+    if (item.status === 'done') {
+      const a = document.createElement('a');
+      a.href = item.fileUrl || `https://drive.google.com/file/d/${encodeURIComponent(item.fileId)}/view`;
+      a.target = '_blank';
+      a.rel = 'noopener';
+      a.textContent = '✓ In Drive';
+      st.append(a);
+    } else {
+      st.textContent = item.status === 'uploading' ? 'Uploading…'
+        : item.status === 'retry' ? `Retry ${item.attempts}` : 'Queued';
+    }
+    li.title = item.lastError ? `${item.name}\n${item.lastError}` : item.name;
+  }
+
+  function renderBanners() {
+    const msgs = [];
+    if (SUPPORT_ERROR) msgs.push(['err', SUPPORT_ERROR]);
+    if (!settings.url || !settings.key) msgs.push(['warn', 'Open Settings and enter your Apps Script web app URL and secret key before recording.']);
+    if (rec.pausedReason) msgs.push(['warn', rec.pausedReason]);
+    if (up.lastError && up.queue.length) {
+      msgs.push(['err', `Upload problem (${up.lastError}). Retrying automatically; parts stay in memory until Drive confirms them.`]);
+    }
+    const mem = up.queue.reduce((n, i) => n + (i.blob ? i.size : 0), 0);
+    if (mem > MEMORY_WARN_BYTES) {
+      msgs.push(['warn', `${fmtBytes(mem)} is waiting in memory. Uploads are slower than recording; lower the quality or use a faster network.`]);
+    }
+    el.banners.replaceChildren(...msgs.map(([kind, text]) => {
+      const d = document.createElement('div');
+      d.className = `banner ${kind}`;
+      d.textContent = text;
+      return d;
+    }));
+  }
+
+  function renderSettingsHint() {
+    const s = readSettingsForm();
+    const q = QUALITY[s.quality];
+    const est = ((q.vbps + (s.audio ? AUDIO_BPS : 0)) * s.segSec) / 8;
+    const mime = pickMime(s);
+    const parts = [`This browser will record ${mime || 'its default format'}.`,
+                   `About ${fmtBytes(est)} per ${s.segSec}s part.`];
+    if (est > SAFE_PART_BYTES) parts.push('That is too large for reliable Apps Script uploads; lower the quality or part length.');
+    if (s.url && !/^https:\/\/script\.google\.com\/(macros|a\/macros\/[^/]+)\/s\/[^/]+\/exec\/?$/.test(s.url)) {
+      parts.push('The URL normally looks like https://script.google.com/macros/s/…/exec');
+    }
+    el.sHint.textContent = parts.join(' ');
+    el.sHint.classList.toggle('warn-text', est > SAFE_PART_BYTES);
+  }
+
+  function renderAll() {
+    const live = streamIsLive();
+    el.placeholder.classList.toggle('hidden', !!stream);
+    el.btnMain.textContent = rec.active ? '■ Stop recording' : live ? '● Start recording' : 'Start camera';
+    el.btnMain.className = rec.active ? 'stop' : 'primary';
+    el.btnMain.disabled = busy || !!SUPPORT_ERROR;
+    el.btnFlip.disabled = busy || !live;
+    el.btnClose.disabled = busy || rec.active || !stream;
+
+    const pending = up.queue.length;
+    const mem = up.queue.reduce((n, i) => n + (i.blob ? i.size : 0), 0);
+    el.stDone.textContent = String(up.doneCount);
+    el.stPending.textContent = String(pending);
+    el.stMem.textContent = fmtBytes(mem);
+    const fmt = rec.current ? (rec.current.r.mimeType || rec.mime) : (rec.mime || pickMime());
+    el.stFormat.textContent = shortFormat(fmt);
+    el.stFormat.title = fmt || '';
+    el.btnRetry.disabled = !pending;
+    el.btnDownload.disabled = !pending;
+    el.listEmpty.classList.toggle('hidden', el.list.children.length > 0);
+
+    if (rec.active) { el.pill.textContent = 'REC'; el.pill.className = 'pill rec'; }
+    else if (up.current) { el.pill.textContent = 'Uploading'; el.pill.className = 'pill up'; }
+    else if (pending) { el.pill.textContent = `${pending} pending`; el.pill.className = 'pill up'; }
+    else if (up.doneCount) { el.pill.textContent = 'All in Drive'; el.pill.className = 'pill ok'; }
+    else { el.pill.textContent = 'Idle'; el.pill.className = 'pill'; }
+
+    [el.sQuality, el.sSeg, el.sFormat, el.sAudio].forEach((x) => { x.disabled = rec.active; });
+    renderBanners();
+  }
+
+  function fillSettingsForm() {
+    el.sUrl.value = settings.url || '';
+    el.sKey.value = settings.key || '';
+    el.sQuality.value = QUALITY[settings.quality] ? settings.quality : 'standard';
+    el.sSeg.value = String(settings.segSec);
+    el.sFormat.value = settings.format;
+    el.sAudio.checked = !!settings.audio;
+    renderSettingsHint();
+  }
+  function readSettingsForm() {
+    const seg = Math.round(Number(el.sSeg.value));
+    return {
+      ...settings,
+      url: el.sUrl.value.trim(),
+      key: el.sKey.value.trim(),
+      quality: QUALITY[el.sQuality.value] ? el.sQuality.value : 'standard',
+      segSec: Number.isFinite(seg) && seg > 0 ? Math.min(600, Math.max(5, seg)) : CONFIG.segmentSeconds,
+      format: ['auto', 'mp4', 'webm'].includes(el.sFormat.value) ? el.sFormat.value : 'auto',
+      audio: el.sAudio.checked,
+    };
+  }
+
+  async function guarded(fn) {
+    if (busy) return;
+    busy = true;
+    renderAll();
+    try { await fn(); } catch (err) {
+      const text = err && err.name && err.name !== 'Error' ? cameraErrorText(err) : (err.message || String(err));
+      log(text, 'error');
+      alert(text);
+    } finally {
+      busy = false;
+      renderAll();
+    }
+  }
+
+  /* ---------- wiring ---------- */
+  Object.entries(QUALITY).forEach(([k, q]) => el.sQuality.add(new Option(q.label, k)));
+
+  el.btnMain.addEventListener('click', () => guarded(async () => {
+    if (rec.active) stopRecording();
+    else if (!streamIsLive()) await openCamera();
+    else await startRecording();
+  }));
+  el.btnFlip.addEventListener('click', () => guarded(flipCamera));
+  el.btnClose.addEventListener('click', () => { if (!rec.active) { stopStream(); log('Camera off.'); renderAll(); } });
+  el.btnRetry.addEventListener('click', () => { up.lastError = ''; retryAllNow(); renderAll(); });
+  el.btnDownload.addEventListener('click', downloadPending);
+  el.btnShowKey.addEventListener('click', () => {
+    const show = el.sKey.type === 'password';
+    el.sKey.type = show ? 'text' : 'password';
+    el.btnShowKey.textContent = show ? 'Hide' : 'Show';
+  });
+  [el.sUrl, el.sKey, el.sQuality, el.sSeg, el.sFormat, el.sAudio].forEach((x) => {
+    x.addEventListener('input', renderSettingsHint);
+    x.addEventListener('change', renderSettingsHint);
+  });
+  el.btnSaveSettings.addEventListener('click', () => guarded(async () => {
+    const next = readSettingsForm();
+    const cameraChanged = next.quality !== settings.quality || next.audio !== settings.audio;
+    settings = next;
+    persist();
+    fillSettingsForm();
+    log('Settings saved.');
+    up.lastError = '';
+    retryAllNow();
+    if (cameraChanged && stream && !rec.active) await openCamera();
+  }));
+  el.btnTest.addEventListener('click', () => guarded(async () => {
+    const saved = settings;
+    settings = readSettingsForm(); // test what is typed, even before saving
+    try {
+      const res = await postToScript({ action: 'ping' });
+      if (!res.ok) throw new Error(res.error || 'rejected');
+      log(`Connected. Uploads go to Drive folder "${res.folder}".`);
+      alert(`Connected. Uploads go to Drive folder "${res.folder}".`);
+    } catch (err) {
+      throw new Error(`Connection test failed: ${err.message}`);
+    } finally {
+      settings = saved;
+    }
+  }));
+  el.btnLink.addEventListener('click', async () => {
+    const s = readSettingsForm();
+    const link = `${location.origin}${location.pathname}#url=${encodeURIComponent(s.url)}&key=${encodeURIComponent(s.key)}`;
+    try { await navigator.clipboard.writeText(link); log('Setup link copied. Open it once on your phone to save these settings there.'); }
+    catch { prompt('Copy this setup link:', link); }
+  });
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      updateWakeLock();
+      if (rec.active && !rec.current) ensureRecording();
+      wakeUploader();
+    } else if (rec.active) {
+      log('Page hidden. The browser may pause the camera until you return.', 'warn');
+    }
+  });
+  window.addEventListener('online', () => { log('Back online.'); retryAllNow(); });
+  window.addEventListener('offline', () => log('Device is offline. Parts stay in memory until the network returns.', 'warn'));
+  window.addEventListener('beforeunload', (e) => {
+    if (rec.active || up.queue.length) { e.preventDefault(); e.returnValue = ''; }
+  });
+
+  importFromHash();
+  fillSettingsForm();
+  if (!settings.url || !settings.key) el.settings.open = true;
+  if (SUPPORT_ERROR) log(SUPPORT_ERROR, 'error');
+  else log(`Ready. Preferred format on this device: ${pickMime() || 'browser default'}.`);
+  renderAll();
+})();
+</script>
+</body>
+</html>
