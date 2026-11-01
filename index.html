@@ -4,7 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0f1115">
-<meta name="referrer" content="no-referrer">
+<meta name="referrer" content="strict-origin-when-cross-origin">
+<script src="https://accounts.google.com/gsi/client" async defer></script>
 <title>Live Recorder → Google Drive</title>
 <style>
   :root {
@@ -86,6 +87,9 @@
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 10px; align-items: end; }
   .btns { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
   .warn-text { color: var(--amber); }
+  .account { margin: 4px 0 0; font-size: 15px; word-break: break-all; }
+  .account.attention { color: var(--amber); }
+  .banner button { margin-top: 8px; display: block; }
   pre { white-space: pre-wrap; word-break: break-word; font-size: 12px; max-height: 260px; overflow: auto; margin: 8px 0 0; color: #c9d1dc; }
 </style>
 </head>
@@ -135,16 +139,14 @@
 
   <details id="settings" class="card">
     <summary>Settings</summary>
-    <label>Apps Script web app URL
-      <input id="sUrl" type="url" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false"
-             placeholder="https://script.google.com/macros/s/…/exec">
-    </label>
-    <label>Secret key
-      <span class="inline">
-        <input id="sKey" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="printed by setup()">
-        <button id="btnShowKey" class="small" type="button">Show</button>
-      </span>
-    </label>
+    <label>Google Drive account</label>
+    <p id="sAccount" class="account">Not signed in</p>
+    <div class="btns">
+      <button id="btnSignIn" class="primary small" type="button">Sign in with Google</button>
+      <button id="btnOpenFolder" class="small" type="button">Open Drive folder</button>
+    </div>
+    <p class="muted small-text">Recordings go to a "Live Recorder" folder in your own Google Drive, one sub-folder per
+      recording. The page can only see files it created. You can move or rename the folder in Drive.</p>
     <div class="grid2">
       <label>Quality <select id="sQuality"></select></label>
       <label>Part length (seconds) <input id="sSeg" type="number" min="5" max="600" step="1" inputmode="numeric"></label>
@@ -160,11 +162,9 @@
     <p id="sHint" class="muted small-text"></p>
     <div class="btns">
       <button id="btnSaveSettings" class="primary small" type="button">Save</button>
-      <button id="btnTest" class="small" type="button">Test connection</button>
-      <button id="btnLink" class="small" type="button">Copy setup link</button>
     </div>
-    <p class="muted small-text">Settings are stored only in this browser. The setup link contains your secret key,
-      so send it only to your own devices.</p>
+    <p class="muted small-text">Settings are stored only in this browser. Browsers allow a Google sign-in for one hour
+      at a time; after that the page asks you to tap once to continue uploading. Recording is not interrupted.</p>
   </details>
 
   <details class="card">
@@ -177,11 +177,22 @@
 (() => {
   'use strict';
 
-  /* Optional defaults. Safe to commit: put the web app URL here if you like, never the secret key. */
+  /* The Web client ID from the Google Cloud project (public by design; it only works on the listed origins). */
   const CONFIG = {
-    scriptUrl: 'https://script.google.com/macros/s/AKfycbyj1YYZatZMXQMnS3rxR_OGWuOo3_J2rwLj_7mXAbVMQCUQQZApl7NIzhEKVjff6UG6IQ/exec',
+    googleClientId: '244556889220-rrkqp29snduah2t0u6l83g8fou83ji1j.apps.googleusercontent.com',
     segmentSeconds: 60,
   };
+  const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
+  const ROOT_FOLDER_NAME = 'Live Recorder';
+  const FOLDER_MIME = 'application/vnd.google-apps.folder';
+  // Local tests only: #test-drive=http://127.0.0.1:18083&test-token=… replaces Google with a stand-in server.
+  const TEST = (() => {
+    if (!/^(localhost|127\.0\.0\.1)$/.test(location.hostname) || location.hash.length < 2) return null;
+    const p = new URLSearchParams(location.hash.slice(1));
+    return p.get('test-drive') && p.get('test-token')
+      ? { base: p.get('test-drive'), token: p.get('test-token'), account: p.get('test-account') || 'tester@example.com' } : null;
+  })();
+  const API = TEST ? TEST.base : 'https://www.googleapis.com';
 
   const QUALITY = {
     low:      { label: 'Low · 480p · ~8 MB/min',       w: 854,  h: 480,  fps: 30, vbps: 1_000_000 },
@@ -189,8 +200,6 @@
     high:     { label: 'High · 1080p · ~27 MB/min',    w: 1920, h: 1080, fps: 30, vbps: 3_500_000 },
   };
   const AUDIO_BPS = 128_000;
-  // Apps Script accepts roughly 50 MB per request and base64 adds 33 %, so stay well below.
-  const SAFE_PART_BYTES = 35 * 1024 * 1024;
   const UPLOAD_TIMEOUT_MS = 5 * 60 * 1000;
   const MEMORY_WARN_BYTES = 300 * 1024 * 1024;
   const SETTINGS_KEY = 'liveRecorder.settings.v1';
@@ -201,9 +210,9 @@
     ovSeg: $('ovSeg'), banners: $('banners'), btnMain: $('btnMain'), btnFlip: $('btnFlip'), btnClose: $('btnClose'),
     stDone: $('stDone'), stPending: $('stPending'), stMem: $('stMem'), stFormat: $('stFormat'),
     btnRetry: $('btnRetry'), btnDownload: $('btnDownload'), list: $('list'), listEmpty: $('listEmpty'),
-    settings: $('settings'), sUrl: $('sUrl'), sKey: $('sKey'), btnShowKey: $('btnShowKey'), sQuality: $('sQuality'),
-    sSeg: $('sSeg'), sFormat: $('sFormat'), sAudio: $('sAudio'), sHint: $('sHint'),
-    btnSaveSettings: $('btnSaveSettings'), btnTest: $('btnTest'), btnLink: $('btnLink'), log: $('log'),
+    settings: $('settings'), sAccount: $('sAccount'), btnSignIn: $('btnSignIn'), btnOpenFolder: $('btnOpenFolder'),
+    sQuality: $('sQuality'), sSeg: $('sSeg'), sFormat: $('sFormat'), sAudio: $('sAudio'), sHint: $('sHint'),
+    btnSaveSettings: $('btnSaveSettings'), log: $('log'),
   };
 
   /* ---------- helpers ---------- */
@@ -246,29 +255,221 @@
   }
 
   /* ---------- settings ---------- */
-  const DEFAULTS = { url: CONFIG.scriptUrl, key: '', quality: 'standard', segSec: CONFIG.segmentSeconds,
+  const DEFAULTS = { account: '', rootFolderId: '', quality: 'standard', segSec: CONFIG.segmentSeconds,
                      format: 'auto', audio: true, facing: 'environment' };
   let settings = (() => {
     let saved = {};
     try { saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}') || {}; } catch { /* ignore */ }
+    delete saved.url; // Apps Script settings from older versions
+    delete saved.key;
     const s = { ...DEFAULTS, ...saved };
-    if (!s.url) s.url = CONFIG.scriptUrl;
+    if (TEST) { s.account = TEST.account; s.rootFolderId = ''; }
     return s;
   })();
   function persist() {
+    if (TEST) return;
     try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch { /* private mode */ }
   }
-  function importFromHash() {
-    if (location.hash.length < 2) return;
-    const p = new URLSearchParams(location.hash.slice(1));
-    let changed = false;
-    if (p.get('url')) { settings.url = p.get('url').trim(); changed = true; }
-    if (p.get('key')) { settings.key = p.get('key').trim(); changed = true; }
-    if (changed) {
-      persist();
-      history.replaceState(null, '', location.pathname + location.search); // keep the key out of the address bar
-      log('Settings imported from setup link.');
+
+  /* ---------- Google sign-in (Google Identity Services, drive.file scope) ---------- */
+  const auth = { token: TEST ? TEST.token : '', expiresAt: TEST ? Infinity : 0, client: null, pending: null,
+                 needsTap: false };
+  class AuthRequired extends Error {}
+
+  function gisReady() { return !!(window.google && google.accounts && google.accounts.oauth2); }
+  function tokenValid() { return !!auth.token && Date.now() < auth.expiresAt - 60_000; }
+
+  // Must be called from a tap: Google shows its sign-in in a pop-up window.
+  function requestToken() {
+    if (TEST) { auth.token = TEST.token; auth.expiresAt = Infinity; auth.needsTap = false; return Promise.resolve(auth.token); }
+    if (!CONFIG.googleClientId) return Promise.reject(new Error('This page has no Google client ID configured yet.'));
+    if (!gisReady()) return Promise.reject(new Error('Google sign-in is still loading. Try again in a moment.'));
+    if (auth.pending) return auth.pending.promise;
+    if (!auth.client) {
+      auth.client = google.accounts.oauth2.initTokenClient({
+        client_id: CONFIG.googleClientId, scope: DRIVE_SCOPE,
+        callback: (resp) => {
+          const p = auth.pending; auth.pending = null;
+          if (!p) return;
+          if (resp.error || !resp.access_token) { p.reject(new Error(resp.error_description || resp.error || 'sign-in failed')); return; }
+          if (!google.accounts.oauth2.hasGrantedAllScopes(resp, DRIVE_SCOPE)) {
+            p.reject(new Error('Drive access was not allowed. Sign in again and tick the Google Drive box.'));
+            return;
+          }
+          auth.token = resp.access_token;
+          auth.expiresAt = Date.now() + Number(resp.expires_in || 3600) * 1000;
+          auth.needsTap = false;
+          p.resolve(auth.token);
+        },
+        error_callback: (e) => {
+          const p = auth.pending; auth.pending = null;
+          if (p) p.reject(new Error(e && e.type === 'popup_failed_to_open'
+            ? 'the browser blocked the Google sign-in window; allow pop-ups for this page'
+            : e && e.type === 'popup_closed' ? 'sign-in was cancelled' : (e && e.message) || 'sign-in failed'));
+        },
+      });
     }
+    let resolve, reject;
+    const promise = new Promise((a, b) => { resolve = a; reject = b; });
+    auth.pending = { promise, resolve, reject };
+    auth.client.requestAccessToken({ prompt: settings.account ? '' : 'select_account', login_hint: settings.account || undefined });
+    return promise;
+  }
+
+  async function signIn() {
+    await requestToken();
+    const about = await driveJson(`/drive/v3/about?fields=${encodeURIComponent('user(emailAddress)')}`);
+    const email = (about.user && about.user.emailAddress) || '';
+    if (!email) throw new Error('Google did not say which account was chosen.');
+    if (email !== settings.account) { settings.rootFolderId = ''; drive.sessionFolders.clear(); up.queue.forEach((i) => { i.uploadUrl = ''; }); }
+    settings.account = email;
+    persist();
+    await rootFolder();
+    log(`Signed in as ${email}. Recordings go to "${ROOT_FOLDER_NAME}" in that Google Drive.`);
+    up.lastError = '';
+    retryAllNow();
+    renderAll();
+  }
+
+  function signOut() {
+    const email = settings.account;
+    if (auth.token && gisReady() && !TEST) { try { google.accounts.oauth2.revoke(auth.token, () => {}); } catch { /* ignore */ } }
+    auth.token = ''; auth.expiresAt = 0; auth.needsTap = false;
+    settings.account = ''; settings.rootFolderId = '';
+    drive.sessionFolders.clear();
+    persist();
+    log(`Signed out of ${email}. Parts that are not in Drive yet stay in this page until you sign in again.`);
+    renderAll();
+  }
+
+  /* ---------- Google Drive v3 REST ---------- */
+  const drive = { sessionFolders: new Map(), rootChecked: '' };
+  const enc = encodeURIComponent;
+  const qEsc = (s) => String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+
+  async function driveFetch(url, opts = {}) {
+    if (!tokenValid()) { auth.needsTap = true; throw new AuthRequired('Google sign-in expired'); }
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), UPLOAD_TIMEOUT_MS);
+    let resp;
+    try {
+      resp = await fetch(url.startsWith('http') ? url : API + url, {
+        ...opts, headers: { ...(opts.headers || {}), Authorization: `Bearer ${auth.token}` },
+        cache: 'no-store', credentials: 'omit', signal: ctrl.signal,
+      });
+    } catch (err) {
+      if (err.name === 'AbortError') throw new Error('request timed out');
+      throw new Error(navigator.onLine === false ? 'device is offline' : `network error (${err.message})`);
+    } finally {
+      clearTimeout(timer);
+    }
+    if (resp.status === 401) { auth.token = ''; auth.needsTap = true; throw new AuthRequired('Google sign-in expired'); }
+    return resp;
+  }
+  async function driveError(resp) {
+    let reason = '', message = '';
+    try { const e = (await resp.json()).error; message = e.message || ''; reason = (e.errors && e.errors[0] && e.errors[0].reason) || ''; } catch { /* not JSON */ }
+    const err = new Error(reason === 'storageQuotaExceeded' ? 'your Google Drive is full' : `Drive error ${resp.status}${message ? ': ' + message : ''}`);
+    err.status = resp.status;
+    return err;
+  }
+  async function driveJson(path, opts) {
+    const resp = await driveFetch(path, opts);
+    if (!resp.ok) throw await driveError(resp);
+    return resp.json();
+  }
+  async function findFolder(name, parent) {
+    const q = `name = '${qEsc(name)}' and '${qEsc(parent)}' in parents and mimeType = '${FOLDER_MIME}' and trashed = false`;
+    const r = await driveJson(`/drive/v3/files?spaces=drive&pageSize=10&q=${enc(q)}&fields=${enc('files(id)')}`);
+    return r.files && r.files[0] ? r.files[0].id : '';
+  }
+  async function createFolder(name, parent, description) {
+    const body = { name, mimeType: FOLDER_MIME, parents: [parent], ...(description ? { description } : {}) };
+    const r = await driveJson('/drive/v3/files?fields=id', { method: 'POST',
+      headers: { 'Content-Type': 'application/json; charset=UTF-8' }, body: JSON.stringify(body) });
+    return r.id;
+  }
+  async function rootFolder() {
+    let id = settings.rootFolderId;
+    if (id && id === drive.rootChecked) return id;
+    if (id) {
+      const resp = await driveFetch(`/drive/v3/files/${enc(id)}?fields=${enc('id,trashed')}`);
+      if (resp.status === 404) id = '';
+      else if (!resp.ok) throw await driveError(resp);
+      else if ((await resp.json()).trashed) id = '';
+    }
+    if (!id) {
+      id = await findFolder(ROOT_FOLDER_NAME, 'root');
+      if (!id) {
+        id = await createFolder(ROOT_FOLDER_NAME, 'root', 'Recordings from the Live Recorder page. One folder per session.');
+        log(`Created the "${ROOT_FOLDER_NAME}" folder in your Google Drive.`);
+      }
+    }
+    drive.rootChecked = id;
+    if (id !== settings.rootFolderId) { settings.rootFolderId = id; persist(); }
+    return id;
+  }
+  async function sessionFolder(session) {
+    if (drive.sessionFolders.has(session)) return drive.sessionFolders.get(session);
+    const root = await rootFolder();
+    const id = (await findFolder(session, root)) || (await createFolder(session, root));
+    drive.sessionFolders.set(session, id);
+    return id;
+  }
+  const FILE_FIELDS = 'id,name,size,sha256Checksum,webViewLink';
+
+  // Resumable upload. The session address is kept on the item, so a retry asks Drive how far it got
+  // (a lost reply is then recognised as done) instead of uploading a second copy.
+  async function driveUpload(item) {
+    if (item.uploadUrl && item.uploadAccount === settings.account) {
+      const resp = await driveFetch(item.uploadUrl, { method: 'PUT', headers: { 'Content-Range': `bytes */${item.size}` } });
+      if (resp.status === 200 || resp.status === 201) return { file: await resp.json(), duplicate: true };
+      if (resp.status === 404 || resp.status === 410) item.uploadUrl = '';
+      else if (resp.status !== 308) throw await driveError(resp);
+      // 308: incomplete. Send the rest, starting at the first byte Drive does not have.
+      if (resp.status === 308) return sendFrom(item, rangeEnd(resp));
+    }
+    const folder = await sessionFolder(item.session);
+    if (!item.uploadUrl && item.attempts > 1) {
+      // A previous attempt may have finished even though its reply never arrived.
+      const q = `name = '${qEsc(item.driveName)}' and '${qEsc(folder)}' in parents and trashed = false`;
+      const r = await driveJson(`/drive/v3/files?spaces=drive&pageSize=10&q=${enc(q)}&fields=${enc(`files(${FILE_FIELDS})`)}`);
+      const same = (r.files || []).find((f) => Number(f.size) === item.size &&
+        (!f.sha256Checksum || f.sha256Checksum.toLowerCase() === item.sha256));
+      if (same) return { file: same, duplicate: true };
+    }
+    const meta = { name: item.driveName, mimeType: item.mimeType, parents: [folder],
+                   description: JSON.stringify(item.meta).slice(0, 4000) };
+    const start = await driveFetch(`/upload/drive/v3/files?uploadType=resumable&fields=${enc(FILE_FIELDS)}`, {
+      method: 'POST', body: JSON.stringify(meta),
+      headers: { 'Content-Type': 'application/json; charset=UTF-8', 'X-Upload-Content-Type': item.mimeType,
+                 'X-Upload-Content-Length': String(item.size) },
+    });
+    if (!start.ok) {
+      if (start.status === 404) { drive.sessionFolders.delete(item.session); drive.rootChecked = ''; }
+      throw await driveError(start);
+    }
+    item.uploadUrl = start.headers.get('Location') || '';
+    item.uploadAccount = settings.account;
+    if (!item.uploadUrl) throw new Error('Drive did not return an upload address');
+    return sendFrom(item, 0);
+  }
+  function rangeEnd(resp) {
+    const r = resp.headers.get('Range');
+    const m = r && r.match(/-(\d+)$/);
+    return m ? Number(m[1]) + 1 : 0;
+  }
+  async function sendFrom(item, offset) {
+    for (let i = 0; i < 5; i++) {
+      const body = offset > 0 ? item.blob.slice(offset) : item.blob;
+      const resp = await driveFetch(item.uploadUrl, { method: 'PUT', body,
+        headers: { 'Content-Range': item.size > offset ? `bytes ${offset}-${item.size - 1}/${item.size}` : `bytes */${item.size}` } });
+      if (resp.status === 200 || resp.status === 201) return { file: await resp.json(), duplicate: false };
+      if (resp.status === 404 || resp.status === 410) { item.uploadUrl = ''; throw new Error('the upload session expired; starting again'); }
+      if (resp.status !== 308) throw await driveError(resp);
+      offset = rangeEnd(resp);
+    }
+    throw new Error('Drive keeps asking for more data; will try again');
   }
 
   /* ---------- platform / format ---------- */
@@ -474,10 +675,12 @@
   }
 
   async function startRecording() {
-    if (!settings.url || !settings.key) {
+    if (!settings.account) {
       el.settings.open = true;
       el.settings.scrollIntoView({ behavior: 'smooth' });
-      throw new Error('Enter the Apps Script web app URL and secret key in Settings first.');
+      await signIn(); // this click counts as the tap Google's pop-up needs
+    } else if (!tokenValid()) {
+      try { await requestToken(); } catch (err) { log(`Sign-in skipped (${err.message}); parts wait until you continue.`, 'warn'); }
     }
     if (!streamIsLive()) await openCamera();
     rec.mime = pickMime();
@@ -539,13 +742,15 @@
   }
 
   /* ---------- upload queue: verify, then drop from memory ---------- */
-  const up = { queue: [], busy: false, current: null, doneCount: 0, doneBytes: 0, lastError: '', wake: null };
+  const up = { queue: [], busy: false, current: null, doneCount: 0, doneBytes: 0, lastError: '', wake: null,
+               waitingForSignIn: false };
 
   function makeItem(seg, blob) {
     const durationMs = seg.endedAt - seg.startedAt;
     return {
       session: seg.session, part: seg.part,
-      name: `${seg.session}_part${pad(seg.part, 4)}.${extFor(blob.type)}`,
+      name: `${seg.session}_part${pad(seg.part, 4)}.${extFor(blob.type)}`, // for "Save pending" downloads
+      driveName: `${seg.part}.${extFor(blob.type)}`, // each session has its own Drive folder
       blob, size: blob.size, mimeType: blob.type.split(';')[0].trim() || 'application/octet-stream', durationMs,
       meta: {
         session: seg.session, part: seg.part, startedAt: new Date(seg.startedAt).toISOString(),
@@ -553,6 +758,7 @@
         width: seg.width, height: seg.height, facing: seg.facing, quality: settings.quality, userAgent: UA,
       },
       attempts: 0, nextTryAt: 0, status: 'queued', lastError: '', fileId: '', fileUrl: '', row: null,
+      uploadUrl: '', uploadAccount: '', sha256: '',
     };
   }
 
@@ -560,9 +766,6 @@
     up.queue.push(item);
     addRow(item);
     log(`Part ${item.part} ready: ${fmtDur(item.durationMs)}, ${fmtBytes(item.size)}.`);
-    if (item.size > SAFE_PART_BYTES) {
-      log(`Part ${item.part} is ${fmtBytes(item.size)}; Apps Script may reject uploads this large. Lower the quality or part length.`, 'warn');
-    }
     wakeUploader(); // the uploader may be sleeping on another part's retry delay
     pumpUploads();
     updateWakeLock();
@@ -602,30 +805,46 @@
     renderAll();
     const t0 = Date.now();
     try {
-      const res = await postToScript({ action: 'upload', session: item.session, name: item.name,
-                                       mimeType: item.mimeType, size: item.size, meta: item.meta }, item.blob);
-      if (!res.ok) throw new Error(res.error || 'Upload rejected by Apps Script');
-      if (Number(res.size) !== item.size) throw new Error(`size check failed (Drive has ${res.size} B, expected ${item.size} B)`);
+      if (!settings.account) throw new AuthRequired('sign in with Google to upload');
+      if (!item.sha256) item.sha256 = await sha256Hex(item.blob);
+      const { file, duplicate } = await driveUpload(item);
+      if (Number(file.size) !== item.size) {
+        item.uploadUrl = '';
+        throw new Error(`check failed (Drive has ${file.size} B, expected ${item.size} B)`);
+      }
+      if (file.sha256Checksum && file.sha256Checksum.toLowerCase() !== item.sha256) {
+        item.uploadUrl = '';
+        throw new Error('check failed (Drive has different content)');
+      }
       // Verified: Drive holds a file with exactly these bytes. Release the local copy.
       item.status = 'done';
-      item.fileId = res.id || '';
-      item.fileUrl = res.url || '';
+      item.fileId = file.id || '';
+      item.fileUrl = file.webViewLink || '';
       item.blob = null;
       item.lastError = '';
       up.queue.splice(up.queue.indexOf(item), 1);
       up.doneCount++;
       up.doneBytes += item.size;
       up.lastError = '';
-      log(`Part ${item.part} verified in Drive (${fmtBytes(item.size)}, ${((Date.now() - t0) / 1000).toFixed(1)} s)` +
-          `${res.duplicate ? ', already existed' : ''}.`);
+      log(`Part ${item.part} verified in Drive as ${item.session}/${item.driveName} (${fmtBytes(item.size)}, ` +
+          `${((Date.now() - t0) / 1000).toFixed(1)} s)${duplicate ? ', already there' : ''}.`);
     } catch (err) {
       const msg = err.name === 'AbortError' ? 'upload timed out' : (err.message || String(err));
-      const delay = Math.min(60000, 2000 * 2 ** Math.min(item.attempts - 1, 5));
-      item.status = 'retry';
-      item.lastError = msg;
-      item.nextTryAt = Date.now() + delay;
-      up.lastError = `part ${item.part}: ${msg}`;
-      log(`Upload of part ${item.part} failed (attempt ${item.attempts}): ${msg}. Retrying in ${Math.round(delay / 1000)} s.`, 'error');
+      if (err instanceof AuthRequired) {
+        item.attempts--; // waiting for a tap is not a failed attempt
+        item.status = 'retry';
+        item.lastError = msg;
+        item.nextTryAt = Date.now() + 10 * 60_000; // signing in calls retryAllNow()
+        if (!up.waitingForSignIn) log(`Uploads are waiting: ${msg}. Tap "Continue uploading".`, 'warn');
+        up.waitingForSignIn = true;
+      } else {
+        const delay = Math.min(60000, 2000 * 2 ** Math.min(item.attempts - 1, 5));
+        item.status = 'retry';
+        item.lastError = msg;
+        item.nextTryAt = Date.now() + delay;
+        up.lastError = `part ${item.part}: ${msg}`;
+        log(`Upload of part ${item.part} failed (attempt ${item.attempts}): ${msg}. Retrying in ${Math.round(delay / 1000)} s.`, 'error');
+      }
     } finally {
       up.current = null;
       updateRow(item);
@@ -633,45 +852,9 @@
     }
   }
 
-  function blobToBase64(blob) {
-    return new Promise((resolve, reject) => {
-      const fr = new FileReader();
-      // The MIME type itself can contain commas ("codecs=vp8,opus"); base64 never does.
-      fr.onload = () => { const s = String(fr.result); resolve(s.slice(s.lastIndexOf(',') + 1)); };
-      fr.onerror = () => reject(fr.error || new Error('Could not read the recorded data'));
-      fr.readAsDataURL(blob);
-    });
-  }
-
-  // Body = one JSON header line, then (for uploads) the base64 file data.
-  // text/plain keeps this a CORS "simple request": Apps Script cannot answer preflight requests.
-  async function postToScript(head, blob) {
-    const url = (settings.url || '').trim();
-    if (!url) throw new Error('Apps Script URL is not set');
-    if (!settings.key) throw new Error('secret key is not set');
-    const headerLine = JSON.stringify({ ...head, key: settings.key });
-    const body = blob ? headerLine + '\n' + await blobToBase64(blob) : headerLine;
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), UPLOAD_TIMEOUT_MS);
-    try {
-      let resp;
-      try {
-        resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body,
-                                  redirect: 'follow', cache: 'no-store', credentials: 'omit', signal: ctrl.signal });
-      } catch (err) {
-        if (err.name === 'AbortError') throw err;
-        throw new Error(navigator.onLine === false ? 'device is offline' : `network error (${err.message})`);
-      }
-      const text = await resp.text();
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      try { return JSON.parse(text); } catch {
-        throw new Error(/<html|<!doctype/i.test(text)
-          ? 'got a web page instead of JSON. Check the URL ends in /exec and the deployment access is "Anyone"'
-          : 'unexpected response from Apps Script');
-      }
-    } finally {
-      clearTimeout(timer);
-    }
+  async function sha256Hex(blob) {
+    const digest = await crypto.subtle.digest('SHA-256', await blob.arrayBuffer());
+    return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
   }
 
   function downloadPending() {
@@ -755,7 +938,10 @@
   function renderBanners() {
     const msgs = [];
     if (SUPPORT_ERROR) msgs.push(['err', SUPPORT_ERROR]);
-    if (!settings.url || !settings.key) msgs.push(['warn', 'Open Settings and enter your Apps Script web app URL and secret key before recording.']);
+    if (!settings.account) msgs.push(['warn', 'Sign in with Google (Settings) so the recordings can go to your Drive.']);
+    else if (up.waitingForSignIn && up.queue.length) {
+      msgs.push(['err', `Google sign-in expired. ${up.queue.length} part(s) wait in this page until you tap below.`, 'Continue uploading']);
+    }
     if (rec.pausedReason) msgs.push(['warn', rec.pausedReason]);
     if (up.lastError && up.queue.length) {
       msgs.push(['err', `Upload problem (${up.lastError}). Retrying automatically; parts stay in memory until Drive confirms them.`]);
@@ -764,10 +950,18 @@
     if (mem > MEMORY_WARN_BYTES) {
       msgs.push(['warn', `${fmtBytes(mem)} is waiting in memory. Uploads are slower than recording; lower the quality or use a faster network.`]);
     }
-    el.banners.replaceChildren(...msgs.map(([kind, text]) => {
+    el.banners.replaceChildren(...msgs.map(([kind, text, action]) => {
       const d = document.createElement('div');
       d.className = `banner ${kind}`;
       d.textContent = text;
+      if (action) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'primary small';
+        b.textContent = action;
+        b.addEventListener('click', continueUploading);
+        d.append(b);
+      }
       return d;
     }));
   }
@@ -779,12 +973,28 @@
     const mime = pickMime(s);
     const parts = [`This browser will record ${mime || 'its default format'}.`,
                    `About ${fmtBytes(est)} per ${s.segSec}s part.`];
-    if (est > SAFE_PART_BYTES) parts.push('That is too large for reliable Apps Script uploads; lower the quality or part length.');
-    if (s.url && !/^https:\/\/script\.google\.com\/(macros|a\/macros\/[^/]+)\/s\/[^/]+\/exec\/?$/.test(s.url)) {
-      parts.push('The URL normally looks like https://script.google.com/macros/s/…/exec');
-    }
     el.sHint.textContent = parts.join(' ');
-    el.sHint.classList.toggle('warn-text', est > SAFE_PART_BYTES);
+  }
+
+  function renderAccount() {
+    const attention = !!settings.account && up.waitingForSignIn && up.queue.length > 0;
+    el.sAccount.textContent = !settings.account ? 'Not signed in'
+      : attention ? `${settings.account} · tap "Continue uploading"` : settings.account;
+    el.sAccount.classList.toggle('attention', attention);
+    el.btnSignIn.textContent = settings.account ? 'Sign out' : 'Sign in with Google';
+    el.btnSignIn.className = settings.account ? 'small' : 'primary small';
+    el.btnSignIn.disabled = busy || (rec.active && !!settings.account);
+    el.btnOpenFolder.disabled = !settings.rootFolderId;
+  }
+
+  function continueUploading() {
+    requestToken().then(() => {
+      up.waitingForSignIn = false;
+      up.lastError = '';
+      log('Signed in again; uploads continue.');
+      retryAllNow();
+      renderAll();
+    }).catch((err) => { log(`Sign-in failed: ${err.message}`, 'error'); alert(`Sign-in failed: ${err.message}`); });
   }
 
   function renderAll() {
@@ -815,12 +1025,11 @@
     else { el.pill.textContent = 'Idle'; el.pill.className = 'pill'; }
 
     [el.sQuality, el.sSeg, el.sFormat, el.sAudio].forEach((x) => { x.disabled = rec.active; });
+    renderAccount();
     renderBanners();
   }
 
   function fillSettingsForm() {
-    el.sUrl.value = settings.url || '';
-    el.sKey.value = settings.key || '';
     el.sQuality.value = QUALITY[settings.quality] ? settings.quality : 'standard';
     el.sSeg.value = String(settings.segSec);
     el.sFormat.value = settings.format;
@@ -831,8 +1040,6 @@
     const seg = Math.round(Number(el.sSeg.value));
     return {
       ...settings,
-      url: el.sUrl.value.trim(),
-      key: el.sKey.value.trim(),
       quality: QUALITY[el.sQuality.value] ? el.sQuality.value : 'standard',
       segSec: Number.isFinite(seg) && seg > 0 ? Math.min(600, Math.max(5, seg)) : CONFIG.segmentSeconds,
       format: ['auto', 'mp4', 'webm'].includes(el.sFormat.value) ? el.sFormat.value : 'auto',
@@ -866,12 +1073,19 @@
   el.btnClose.addEventListener('click', () => { if (!rec.active) { stopStream(); log('Camera off.'); renderAll(); } });
   el.btnRetry.addEventListener('click', () => { up.lastError = ''; retryAllNow(); renderAll(); });
   el.btnDownload.addEventListener('click', downloadPending);
-  el.btnShowKey.addEventListener('click', () => {
-    const show = el.sKey.type === 'password';
-    el.sKey.type = show ? 'text' : 'password';
-    el.btnShowKey.textContent = show ? 'Hide' : 'Show';
+  el.btnSignIn.addEventListener('click', () => {
+    if (settings.account) {
+      const pending = up.queue.length;
+      if (confirm(`Sign out of ${settings.account}? Files already uploaded stay in Drive.` +
+                  (pending ? ` ${pending} part(s) not uploaded yet stay in this page until you sign in again.` : ''))) signOut();
+    } else {
+      guarded(signIn);
+    }
   });
-  [el.sUrl, el.sKey, el.sQuality, el.sSeg, el.sFormat, el.sAudio].forEach((x) => {
+  el.btnOpenFolder.addEventListener('click', () => {
+    if (settings.rootFolderId) window.open(`https://drive.google.com/drive/folders/${encodeURIComponent(settings.rootFolderId)}`, '_blank', 'noopener');
+  });
+  [el.sQuality, el.sSeg, el.sFormat, el.sAudio].forEach((x) => {
     x.addEventListener('input', renderSettingsHint);
     x.addEventListener('change', renderSettingsHint);
   });
@@ -886,26 +1100,6 @@
     retryAllNow();
     if (cameraChanged && stream && !rec.active) await openCamera();
   }));
-  el.btnTest.addEventListener('click', () => guarded(async () => {
-    const saved = settings;
-    settings = readSettingsForm(); // test what is typed, even before saving
-    try {
-      const res = await postToScript({ action: 'ping' });
-      if (!res.ok) throw new Error(res.error || 'rejected');
-      log(`Connected. Uploads go to Drive folder "${res.folder}".`);
-      alert(`Connected. Uploads go to Drive folder "${res.folder}".`);
-    } catch (err) {
-      throw new Error(`Connection test failed: ${err.message}`);
-    } finally {
-      settings = saved;
-    }
-  }));
-  el.btnLink.addEventListener('click', async () => {
-    const s = readSettingsForm();
-    const link = `${location.origin}${location.pathname}#url=${encodeURIComponent(s.url)}&key=${encodeURIComponent(s.key)}`;
-    try { await navigator.clipboard.writeText(link); log('Setup link copied. Open it once on your phone to save these settings there.'); }
-    catch { prompt('Copy this setup link:', link); }
-  });
 
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') {
@@ -922,9 +1116,9 @@
     if (rec.active || up.queue.length) { e.preventDefault(); e.returnValue = ''; }
   });
 
-  importFromHash();
   fillSettingsForm();
-  if (!settings.url || !settings.key) el.settings.open = true;
+  if (!settings.account) el.settings.open = true;
+  else if (!tokenValid()) up.waitingForSignIn = true; // a fresh page has no token yet; the first tap gets one
   if (SUPPORT_ERROR) log(SUPPORT_ERROR, 'error');
   else log(`Ready. Preferred format on this device: ${pickMime() || 'browser default'}.`);
   renderAll();
