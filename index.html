@@ -87,6 +87,9 @@
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 10px; align-items: end; }
   .btns { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
   .warn-text { color: var(--amber); }
+  .about { margin: 18px 2px 8px; font-size: 13px; color: var(--muted); }
+  .about p { margin: 0 0 8px; }
+  .about a { color: #93c5fd; }
   .account { margin: 4px 0 0; font-size: 15px; word-break: break-all; }
   .account.attention { color: var(--amber); }
   .banner button { margin-top: 8px; display: block; }
@@ -171,6 +174,14 @@
     <summary>Log</summary>
     <pre id="log"></pre>
   </details>
+
+  <footer class="about">
+    <p><b>About Live Recorder.</b> Records video from your phone's camera in one-minute parts and uploads each part to
+      your own Google Drive while you record, so a recording is safe even if the phone is lost or the page closes.
+      You sign in with Google; the page can see only the files it creates, in a "Live Recorder" folder in your Drive.
+      Nothing is sent to any other server.</p>
+    <p><a href="privacy.html">Privacy policy</a></p>
+  </footer>
 </main>
 
 <script>
